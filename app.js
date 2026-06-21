@@ -1,517 +1,558 @@
-// ── STATE & STORAGE ───────────────────────────────────────────
+// ── STORAGE ───────────────────────────────────────────────────
 const DB = {
-  get(k, def=null){ try{ const v=localStorage.getItem(k); return v!==null?JSON.parse(v):def; }catch(e){ return def; } },
-  set(k,v){ try{ localStorage.setItem(k,JSON.stringify(v)); }catch(e){} },
+  get(k,def=null){try{const v=localStorage.getItem(k);return v!==null?JSON.parse(v):def;}catch(e){return def;}},
+  set(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
 };
 
-const State = {
+// ── STATE ─────────────────────────────────────────────────────
+const S = {
   page: 'home',
-  phase: DB.get('phase','p1'),
-  programStart: DB.get('programStart', null),
-  workoutLogs: DB.get('workoutLogs', {}),     // { "2024-01-15": { phaseId, dayId, exercises:{id:true}, done:false } }
-  cardioLogs: DB.get('cardioLogs', {}),        // { "2024-01-15": { blockId, duration, done:true } }
-  mealLogs: DB.get('mealLogs', {}),            // { "2024-01-15": { m1:true, m2:true } }
-  bodyStats: DB.get('bodyStats', []),          // [{ date, weight, waist }]
-  selectedWorkoutDay: null,
-  expandedEx: null,
-  modal: null,
+  programStart: DB.get('programStart',null),
+  workoutLogs:  DB.get('workoutLogs',{}),
+  cardioLogs:   DB.get('cardioLogs',{}),
+  mealLogs:     DB.get('mealLogs',{}),
+  bodyStats:    DB.get('bodyStats',[]),
+  expandedEx:   null,
+  viewDay:      null,  // for workout tab browsing
 };
 
-function save(key, val){ State[key]=val; DB.set(key,val); }
+function save(k,v){S[k]=v;DB.set(k,v);}
 
 // ── HELPERS ───────────────────────────────────────────────────
-function today(){ return new Date().toISOString().split('T')[0]; }
-function fmt(d){ return new Date(d+'T00:00:00').toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'2-digit'}); }
-function fmtShort(d){ return new Date(d+'T00:00:00').toLocaleDateString('en-IN',{day:'2-digit',month:'short'}); }
-function currentPhase(){ return PROGRAM.phases.find(p=>p.id===State.phase)||PROGRAM.phases[0]; }
-function showToast(msg){ const t=document.getElementById('toast'); t.textContent=msg; t.style.opacity='1'; setTimeout(()=>t.style.opacity='0',2000); }
+function today(){return new Date().toISOString().split('T')[0];}
+function daysBetween(a,b){return Math.floor((new Date(b)-new Date(a))/(86400000));}
+function fmt(d){return new Date(d+'T00:00:00').toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'2-digit'});}
+function fmtS(d){return new Date(d+'T00:00:00').toLocaleDateString('en-IN',{day:'2-digit',month:'short'});}
+function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.style.opacity='1';setTimeout(()=>t.style.opacity='0',2200);}
+const DAY_NAMES = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 
-function navigate(page){
-  State.page=page;
-  State.selectedWorkoutDay=null;
-  State.expandedEx=null;
-  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
-  const nb=document.getElementById('nav-'+page);
+// ── PROGRAM LOGIC ─────────────────────────────────────────────
+// Returns { phase, phaseDay (0-indexed within phase), programDay, weekNum, todayScheduleLabel, todayDayObj, isRest }
+function getProgramStatus(dateStr) {
+  if (!S.programStart) return null;
+  const dayNum = daysBetween(S.programStart, dateStr); // 0-indexed
+  if (dayNum < 0) return null;
+  const weekNum = Math.floor(dayNum / 7) + 1;
+  const dayOfWeek = dayNum % 7; // 0=Mon equiv in schedule
+
+  // Determine phase
+  let phase, phaseStartDay;
+  if (weekNum <= 8)       { phase = PROGRAM.phases[0]; phaseStartDay = 0; }
+  else if (weekNum <= 18) { phase = PROGRAM.phases[1]; phaseStartDay = 8*7; }
+  else                    { phase = PROGRAM.phases[2]; phaseStartDay = 18*7; }
+
+  const scheduleLabel = phase.schedule[dayOfWeek];
+  const isRest = scheduleLabel.includes('Rest') || scheduleLabel.includes('Active');
+  const dayObj = isRest ? null : phase.days.find(d => d.name === scheduleLabel);
+
+  return { phase, programDay: dayNum+1, weekNum, dayOfWeek, scheduleLabel, dayObj, isRest };
+}
+
+function getTodayStatus() { return getProgramStatus(today()); }
+
+// ── NAVIGATE ──────────────────────────────────────────────────
+function go(page){
+  S.page=page; S.expandedEx=null; S.viewDay=null;
+  document.querySelectorAll('.nb').forEach(b=>b.classList.remove('active'));
+  const nb=document.getElementById('nb-'+page);
   if(nb) nb.classList.add('active');
   render();
 }
 
-function weekNumber(){
-  if(!State.programStart) return 1;
-  const diff=Math.floor((new Date()-new Date(State.programStart))/(7*24*3600*1000));
-  return Math.max(1, diff+1);
-}
-
-// ── RENDER ENGINE ─────────────────────────────────────────────
+// ── RENDER ────────────────────────────────────────────────────
 function render(){
   const c=document.getElementById('content');
-  const hr=document.getElementById('header-right');
   c.innerHTML='';
-  hr.innerHTML='';
-  c.classList.add('fade-in');
-  setTimeout(()=>c.classList.remove('fade-in'),300);
-
-  if(State.page==='home')      renderHome(c,hr);
-  else if(State.page==='workout')   renderWorkout(c,hr);
-  else if(State.page==='cardio')    renderCardio(c,hr);
-  else if(State.page==='nutrition') renderNutrition(c,hr);
-  else if(State.page==='stats')     renderStats(c,hr);
-
-  if(State.modal) renderModal();
+  c.classList.add('fade-up');
+  setTimeout(()=>c.classList.remove('fade-up'),300);
+  if(S.page==='home')      renderHome(c);
+  else if(S.page==='workout')   renderWorkout(c);
+  else if(S.page==='cardio')    renderCardio(c);
+  else if(S.page==='nutrition') renderNutrition(c);
+  else if(S.page==='stats')     renderStats(c);
+  // Update header sub
+  const hs=document.getElementById('header-sub');
+  const ts=getTodayStatus();
+  if(hs && ts) hs.textContent=`Week ${ts.weekNum} · ${ts.phase.label}`;
+  else if(hs) hs.textContent='6-Month Transformation';
 }
 
 // ── HOME ──────────────────────────────────────────────────────
 function renderHome(c){
-  const ph=currentPhase();
-  const td=today();
-  const wLog=State.workoutLogs[td]||{};
-  const cLog=State.cardioLogs[td]||{};
-  const mLog=State.mealLogs[td]||{};
-  const wk=weekNumber();
-  const lastStat=State.bodyStats.length?State.bodyStats[State.bodyStats.length-1]:null;
-  const currentW=lastStat?lastStat.weight:PROGRAM.startWeight;
-  const lost=+(PROGRAM.startWeight-currentW).toFixed(1);
-  const toGo=+(currentW-PROGRAM.targetWeight).toFixed(1);
-  const pct=Math.round((lost/(PROGRAM.startWeight-PROGRAM.targetWeight))*100);
+  if(!S.programStart){ renderOnboard(c); return; }
 
-  // Meals counted
-  const nutrition=PROGRAM.nutrition[State.phase]||PROGRAM.nutrition.p1;
-  const mealsTotal=nutrition.meals.length;
-  const mealsDone=nutrition.meals.filter(m=>mLog[m.id]).length;
+  const ts = getTodayStatus();
+  const td = today();
+  const wLog = S.workoutLogs[td]||{};
+  const cLog = S.cardioLogs[td]||{};
+  const mLog = S.mealLogs[td]||{};
+  const nutrition = PROGRAM.nutrition[ts.phase.id]||PROGRAM.nutrition.p1;
+  const mealsDone = nutrition.meals.filter(m=>mLog[m.id]).length;
+  const lastStat = S.bodyStats.length ? S.bodyStats[S.bodyStats.length-1] : null;
+  const curW = lastStat ? lastStat.weight : PROGRAM.startWeight;
+  const lost = +(PROGRAM.startWeight - curW).toFixed(1);
+  const toGo = +(curW - PROGRAM.targetWeight).toFixed(1);
+  const pct = Math.min(100,Math.max(0,Math.round((lost/(PROGRAM.startWeight-PROGRAM.targetWeight))*100)));
+  const streak = calcStreak();
 
-  // Streak
-  let streak=0;
-  const d=new Date();
-  for(let i=0;i<60;i++){
-    const dd=new Date(d); dd.setDate(d.getDate()-i);
-    const ds=dd.toISOString().split('T')[0];
-    if(State.workoutLogs[ds]&&State.workoutLogs[ds].done) streak++;
-    else if(i>0) break;
+  // Build week calendar
+  const weekDays = [];
+  for(let i=0;i<7;i++){
+    const d=new Date(S.programStart);
+    const baseDay=Math.floor((daysBetween(S.programStart,td))/7)*7;
+    d.setDate(d.getDate()+baseDay+i);
+    const ds=d.toISOString().split('T')[0];
+    const st=getProgramStatus(ds);
+    const isDone=S.workoutLogs[ds]&&S.workoutLogs[ds].done;
+    const isToday=ds===td;
+    weekDays.push({ds,st,isDone,isToday,dayName:DAY_NAMES[d.getDay()]});
   }
 
-  if(!State.programStart){
-    c.innerHTML=`
-    <div class="card accent mb16">
-      <div class="sec-eyebrow">Welcome</div>
-      <div class="sec-title">Start Your Transformation</div>
-      <p class="t2 small" style="line-height:1.7;margin-bottom:14px">Set your program start date to track progress across all 26 weeks.</p>
-      <div class="input-group">
-        <label>Program Start Date</label>
-        <input type="date" id="startDate" value="${td}" max="${td}"/>
-      </div>
-      <button class="btn btn-primary" style="width:100%" onclick="setStart()">Begin Program →</button>
+  let html = ``;
+
+  // TODAY CARD
+  if(ts.isRest){
+    html+=`<div class="card mb16" style="background:var(--s2);border-color:var(--border)">
+      <div class="label mb8">TODAY · ${fmt(td)}</div>
+      <div style="font-size:22px;font-weight:800;letter-spacing:-.03em;margin-bottom:4px">${ts.scheduleLabel} 😴</div>
+      <div class="t2 small">Week ${ts.weekNum} · ${ts.phase.label}: ${ts.phase.title}</div>
+      <div class="div"></div>
+      <div class="small t2" style="line-height:1.6">Recovery is when you grow. Walk 7,000+ steps, eat your meals, sleep 8 hours.</div>
     </div>`;
-    return;
+  } else if(ts.dayObj){
+    const wDone=wLog.done;
+    html+=`<div class="today-badge mb16">
+      <div class="phase-label">TODAY · Week ${ts.weekNum} · ${ts.phase.label}</div>
+      <div class="day-title">${ts.dayObj.name}</div>
+      <div class="day-sub">${ts.dayObj.focus} · ${ts.dayObj.exercises.length} exercises</div>
+      <button class="start-btn" onclick="startTodayWorkout()">${wDone?'✓ Done — View Again':'Start Workout →'}</button>
+    </div>`;
   }
 
-  c.innerHTML=`
-  <!-- Phase + Week -->
-  <div class="card mb12" style="background:${ph.color}12;border-color:${ph.color}35">
+  // WEEK CALENDAR
+  html+=`<div class="label mb8">This Week</div>
+  <div class="week-cal mb16">
+    ${weekDays.map(wd=>{
+      const isRest=wd.st&&(wd.st.isRest);
+      const label=wd.st?(wd.isDone?'✓':(isRest?'—':wd.st.scheduleLabel.replace('Full Body ','').replace(' A','A').replace(' B','B').replace('Upper ','U').replace('Lower ','L').replace('Push ','P').replace('Pull ','Pu').replace('Legs','Leg').split(' ')[0])):'·';
+      return `<div class="wc-day${wd.isToday?' active':''}${wd.isDone&&!wd.isToday?' done':''}${isRest?' rest':''}">
+        <div class="wc-name">${wd.dayName}</div>
+        <div class="wc-label">${label}</div>
+      </div>`;
+    }).join('')}
+  </div>`;
+
+  // STATS ROW
+  html+=`<div class="stat-grid">
+    <div class="stat-box">
+      <div class="stat-val g">${curW}<span style="font-size:12px"> kg</span></div>
+      <div class="stat-sub">Current Weight</div>
+      ${lost>0?`<div class="small mt4" style="color:var(--g)">▼ ${lost} kg lost</div>`:''}
+    </div>
+    <div class="stat-box">
+      <div class="stat-val" style="color:var(--orange)">${streak} 🔥</div>
+      <div class="stat-sub">Day Streak</div>
+      <div class="small mt4 t3">${toGo>0?toGo+' kg to go':'🎉 Target!'}</div>
+    </div>
+  </div>`;
+
+  // PROGRESS BAR
+  html+=`<div class="card mb16 g">
+    <div class="row between mb8">
+      <span class="small bold">Overall Progress</span>
+      <span class="mono xs g">${pct}%</span>
+    </div>
+    <div class="pbar mb6"><div class="pbar-fill" style="width:${pct}%;background:var(--g)"></div></div>
+    <div class="row between xs t3 mono"><span>${PROGRAM.startWeight} kg</span><span>→ ${PROGRAM.targetWeight} kg</span></div>
+  </div>`;
+
+  // TODAY CHECKLIST
+  html+=`<div class="label mb8">Today's Checklist</div>
+  <div class="card mb16">
+    ${checkItem('workout-check', wLog.done?'Workout done':'Workout — '+((ts.dayObj&&ts.dayObj.name)||ts.scheduleLabel), wLog.done, "go('workout')")}
+    ${checkItem('cardio-check', cLog.done?`Cardio done (${cLog.duration} min)`:'20 min Cardio', cLog.done, "go('cardio')")}
+    ${checkItem('meal-check', `Meals ${mealsDone}/${nutrition.meals.length} tracked`, mealsDone===nutrition.meals.length, "go('nutrition')")}
+    ${checkItem('water-check', 'Drink 3.5L water', DB.get('water-'+td,false), "toggleWater()")}
+  </div>`;
+
+  // PHASE INFO
+  html+=`<div class="label mb8">Current Phase</div>
+  <div class="card" style="background:${ts.phase.color}12;border-color:${ts.phase.color}35">
     <div class="row between mb8">
       <div>
-        <div style="color:${ph.color};font-family:var(--mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;margin-bottom:4px">Week ${wk} of 26</div>
-        <div style="font-family:var(--display);font-size:18px;font-weight:700">${ph.label}: ${ph.title}</div>
+        <div style="color:${ts.phase.color};font-family:var(--mono);font-size:10px;letter-spacing:.15em;text-transform:uppercase;margin-bottom:3px">${ts.phase.weeks}</div>
+        <div style="font-size:16px;font-weight:700">${ts.phase.label}: ${ts.phase.title}</div>
       </div>
-      <span class="chip" style="background:${ph.color}20;color:${ph.color};border:1px solid ${ph.color}35">${ph.tag}</span>
+      <span class="chip" style="background:${ts.phase.color}18;color:${ts.phase.color};border:1px solid ${ts.phase.color}35">${ts.phase.tag}</span>
     </div>
-    <div style="background:#1a1a1a;border-radius:99px;height:5px;overflow:hidden;margin-bottom:6px">
-      <div style="width:${Math.min(100,Math.max(0,pct))}%;background:${ph.color};height:100%;border-radius:99px;transition:width 1s ease"></div>
-    </div>
-    <div class="row between">
-      <span class="t3 small mono">${PROGRAM.startWeight} kg start</span>
-      <span class="small" style="color:${ph.color}" class="mono">${PROGRAM.targetWeight} kg target</span>
-    </div>
-  </div>
+    <div class="small t2" style="line-height:1.6">${ts.phase.goal}</div>
+  </div>`;
 
-  <!-- Today summary -->
-  <div class="sec-eyebrow mt16">Today · ${fmt(td)}</div>
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:16px">
-    ${statMini('Workout', wLog.done?'Done':'Pending', wLog.done?'green':'', ph.color)}
-    ${statMini('Cardio', cLog.done?'Done':'Pending', cLog.done?'green':'')}
-    ${statMini('Meals', mealsDone+'/'+mealsTotal, mealsDone===mealsTotal?'green':'')}
-  </div>
-
-  <!-- Weight + streak -->
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px">
-    <div class="card" style="text-align:center">
-      <div style="font-family:var(--mono);font-size:22px;font-weight:700;color:var(--accent)">${currentW} <span style="font-size:13px">kg</span></div>
-      <div class="t3 small">Current Weight</div>
-      <div class="small mt8" style="color:${lost>0?'var(--accent)':'var(--t2)'}">${lost>0?'▼ '+lost+' kg lost':'-'}</div>
-    </div>
-    <div class="card" style="text-align:center">
-      <div style="font-family:var(--mono);font-size:22px;font-weight:700;color:var(--warn)">${streak}</div>
-      <div class="t3 small">Day Streak 🔥</div>
-      <div class="small mt8 t3">${toGo > 0 ? toGo+' kg to go':'Target reached! 🎉'}</div>
-    </div>
-  </div>
-
-  <!-- Quick actions -->
-  <div class="sec-eyebrow">Quick Actions</div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px">
-    <button class="btn btn-primary" onclick="navigate('workout')" style="padding:14px">💪 Log Workout</button>
-    <button class="btn btn-ghost" onclick="navigate('cardio')" style="padding:14px">🏃 Log Cardio</button>
-    <button class="btn btn-ghost" onclick="navigate('nutrition')" style="padding:14px">🍱 Track Meals</button>
-    <button class="btn btn-ghost" onclick="navigate('stats')" style="padding:14px">📊 Log Weight</button>
-  </div>
-
-  <!-- Phase switch -->
-  <div class="sec-eyebrow mt16">Change Phase</div>
-  <div style="display:flex;gap:8px">
-    ${PROGRAM.phases.map(p=>`
-      <button onclick="switchPhase('${p.id}')" style="flex:1;background:${State.phase===p.id?p.color+'20':'var(--card)'};color:${State.phase===p.id?p.color:'var(--t2)'};border:1px solid ${State.phase===p.id?p.color+'50':'var(--border)'};border-radius:9px;padding:9px 6px;font-size:11px;font-weight:600;cursor:pointer">
-        ${p.label}<br><span style="font-size:10px;opacity:.7">${p.title}</span>
-      </button>`).join('')}
-  </div>
-  `;
+  c.innerHTML=html;
 }
 
-function statMini(label,val,type,accentColor){
-  const col=type==='green'?'var(--accent)':accentColor||'var(--t2)';
-  return `<div class="card" style="text-align:center;padding:12px 8px">
-    <div style="font-family:var(--mono);font-size:13px;font-weight:700;color:${col}">${val}</div>
-    <div class="t3" style="font-size:10px;margin-top:3px">${label}</div>
+function checkItem(id,label,done,onclick){
+  return `<div class="row gap10" style="padding:11px 0;border-bottom:1px solid var(--border);cursor:pointer" onclick="${onclick}">
+    <div class="chk${done?' on':''}">${done?`<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>`:''}</div>
+    <span class="small${done?' t3':''}" style="${done?'text-decoration:line-through':''}">${label}</span>
+    <span class="t3" style="margin-left:auto">›</span>
+  </div>`;
+}
+
+function toggleWater(){
+  const td=today();const key='water-'+td;
+  const v=!DB.get(key,false);DB.set(key,v);
+  toast(v?'Water goal logged 💧':'Unmarked');render();
+}
+
+function startTodayWorkout(){
+  const ts=getTodayStatus();
+  if(ts&&ts.dayObj){S.viewDay=ts.dayObj.id;S.page='workout';}
+  document.querySelectorAll('.nb').forEach(b=>b.classList.remove('active'));
+  document.getElementById('nb-workout').classList.add('active');
+  render();
+}
+
+function calcStreak(){
+  let streak=0;
+  const d=new Date();
+  for(let i=0;i<90;i++){
+    const dd=new Date(d);dd.setDate(d.getDate()-i);
+    const ds=dd.toISOString().split('T')[0];
+    const st=getProgramStatus(ds);
+    if(!st) break;
+    if(st.isRest){continue;} // rest days don't break streak
+    if(S.workoutLogs[ds]&&S.workoutLogs[ds].done) streak++;
+    else if(i>0) break;
+  }
+  return streak;
+}
+
+// ── ONBOARD ───────────────────────────────────────────────────
+function renderOnboard(c){
+  c.innerHTML=`<div class="onboard fade-up">
+    <div class="center mb20">
+      <div style="width:72px;height:72px;background:var(--g);border-radius:20px;margin:0 auto 16px;display:flex;align-items:center;justify-content:center;">
+        <span style="font-size:36px;font-weight:900;color:#0D0D0D;font-family:var(--mono)">K</span>
+      </div>
+      <div style="font-size:26px;font-weight:900;letter-spacing:-.03em;margin-bottom:6px">Welcome, Ketan</div>
+      <div class="t2 small" style="line-height:1.7">Your 6-month transformation starts here.<br/>Set your start date to begin.</div>
+    </div>
+    <div class="card g mb16">
+      <div class="label mb12">What this app tracks</div>
+      ${['Auto-detects your phase & day each morning','Daily workout with exercise instructions','Cardio progression — beginner to 20 min run','Meal tracking with budget protein guide','Weight & waist progress over 26 weeks'].map(t=>`
+        <div class="row gap8" style="padding:7px 0;border-bottom:1px solid var(--border)">
+          <span class="g bold">→</span><span class="small t2">${t}</span>
+        </div>`).join('')}
+    </div>
+    <div class="card mb16">
+      <div class="inp-group" style="margin-bottom:0">
+        <label>Program Start Date</label>
+        <input type="date" id="startDate" value="${today()}" max="${today()}"/>
+      </div>
+    </div>
+    <button class="btn btn-g btn-full" style="padding:16px;font-size:15px" onclick="setStart()">Begin My Transformation →</button>
   </div>`;
 }
 
 function setStart(){
   const v=document.getElementById('startDate').value;
-  if(!v) return;
+  if(!v)return;
   save('programStart',v);
-  showToast('Program started! Let\'s go 💪');
-  render();
-}
-
-function switchPhase(id){
-  save('phase',id);
-  showToast('Switched to '+PROGRAM.phases.find(p=>p.id===id).title);
+  toast('Program started! 💪');
   render();
 }
 
 // ── WORKOUT ───────────────────────────────────────────────────
 function renderWorkout(c){
-  const ph=currentPhase();
+  const ts=getTodayStatus();
+  const ph=ts?ts.phase:PROGRAM.phases[0];
   const td=today();
+  const wLog=S.workoutLogs[td]||{};
 
-  if(!State.selectedWorkoutDay){
-    // Day selector
-    const wLog=State.workoutLogs[td]||{};
-    c.innerHTML=`
-    <div class="sec-eyebrow">${ph.label} · ${ph.weeks}</div>
-    <div class="sec-title">Select Today's Session</div>
-    ${ph.days.map(day=>{
-      const doneToday=wLog.dayId===day.id&&wLog.done;
-      return `<button onclick="selectWorkoutDay('${day.id}')" class="card mb8" style="width:100%;text-align:left;cursor:pointer;border-color:${doneToday?'var(--accent-b)':'var(--border)'}">
-        <div class="row between">
-          <div>
-            <div style="color:${ph.color};font-family:var(--mono);font-size:10px;letter-spacing:.15em;text-transform:uppercase;margin-bottom:4px">${day.id}</div>
-            <div style="font-family:var(--display);font-size:16px;font-weight:700;margin-bottom:2px">${day.name}</div>
-            <div class="t3 small">${day.focus}</div>
-          </div>
-          <div style="text-align:right">
-            ${doneToday?'<span class="chip green">✓ Done</span>':'<span class="t3 small">'+day.exercises.length+' exercises</span>'}
-            <div style="color:${ph.color};font-size:20px;margin-top:6px">→</div>
-          </div>
-        </div>
-      </button>`;
-    }).join('')}
-
-    <div class="sec-eyebrow mt20">Recent Sessions</div>
-    ${recentWorkouts()}
-    `;
-  } else {
-    // Day detail
-    const day=ph.days.find(d=>d.id===State.selectedWorkoutDay);
-    if(!day){ State.selectedWorkoutDay=null; render(); return; }
-    const wLog=State.workoutLogs[td]||{};
-    const exDone=wLog.exercises||{};
-    const allDone=day.exercises.every(e=>exDone[e.id]);
-
-    c.innerHTML=`
-    <button class="btn btn-ghost mb12 small" onclick="backToDays()" style="padding:7px 14px">← Back</button>
-    <div style="color:${ph.color};font-family:var(--mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;margin-bottom:5px">${ph.label} · ${day.id}</div>
-    <div style="font-family:var(--display);font-size:20px;font-weight:700;margin-bottom:4px">${day.name}</div>
-    <div class="t2 small mb16">${day.focus}</div>
-
-    <!-- Warmup -->
-    <div style="color:var(--warn);font-family:var(--mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;margin-bottom:10px">🔥 Warm-Up (10–12 min)</div>
-    <div class="card warn mb16">
-      ${day.warmup.map((w,i)=>`
-        <div class="row between" style="padding:9px 0;${i<day.warmup.length-1?'border-bottom:1px solid var(--border)':''}">
-          <div>
-            <div class="small" style="font-weight:500;color:var(--t1)">${w.name}</div>
-            <div class="t3 small">${w.cue}</div>
-          </div>
-          <span class="chip warn">${w.sets}</span>
-        </div>`).join('')}
-    </div>
-
-    <!-- Exercises -->
-    <div style="color:${ph.color};font-family:var(--mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;margin-bottom:10px">💪 Main Workout</div>
-    ${day.exercises.map((ex,i)=>{
-      const done=!!exDone[ex.id];
-      const open=State.expandedEx===ex.id;
-      return `<div class="ex-card" style="${done?'border-color:var(--accent-b)':''}">
-        <div class="ex-header" onclick="toggleEx('${ex.id}')">
-          <div onclick="event.stopPropagation();toggleExDone('${ex.id}','${day.id}')" class="check-box${done?' done':''}">
-            ${done?`<svg viewBox="0 0 24 24" fill="none"><polyline points="20 6 9 17 4 12"/></svg>`:''}
-          </div>
-          <div style="flex:1">
-            <div class="small bold ${done?'t3':''}" style="${done?'text-decoration:line-through':''}">${i+1}. ${ex.name}</div>
-            <div class="t3 small">${ex.muscles}</div>
-          </div>
-          <span class="chip green" style="margin-right:6px">${ex.sets}</span>
-          <span style="color:${open?ph.color:'var(--t3)'};font-size:18px;transition:transform .2s;display:block;transform:${open?'rotate(90deg)':'none'}">›</span>
-        </div>
-        ${open?`<div class="ex-body">
-          <div class="ex-how">${ex.how}</div>
-          ${ex.cue?`<div class="ex-cue">💡 ${ex.cue}</div>`:''}
-        </div>`:''}
-      </div>`;
-    }).join('')}
-
-    <div style="height:16px"></div>
-    <button class="btn ${allDone?'btn-primary':'btn-ghost'}" style="width:100%;padding:14px" onclick="finishWorkout('${day.id}')">
-      ${wLog.done&&wLog.dayId===day.id?'✓ Workout Logged':'Mark Workout Complete ✓'}
-    </button>
-    ${wLog.done&&wLog.dayId===day.id?`<p class="t3 small" style="text-align:center;margin-top:8px">Logged ${fmt(td)}</p>`:''}
-    `;
+  if(S.viewDay){
+    // Show specific day
+    const day=ph.days.find(d=>d.id===S.viewDay)||ph.days[0];
+    renderDayDetail(c,day,ph,td,wLog);
+    return;
   }
-}
 
-function recentWorkouts(){
-  const entries=Object.entries(State.workoutLogs)
-    .filter(([,v])=>v.done)
-    .sort(([a],[b])=>b.localeCompare(a))
-    .slice(0,5);
-  if(!entries.length) return `<p class="t3 small">No sessions logged yet. Start today!</p>`;
-  return entries.map(([date,log])=>`
-    <div class="row between" style="padding:9px 0;border-bottom:1px solid var(--border)">
-      <div>
-        <div class="small" style="font-weight:500">${log.dayName||log.dayId}</div>
-        <div class="t3 small">${fmt(date)}</div>
+  // Phase overview + day list
+  let html=`<div class="label mb4">${ph.label} · ${ph.weeks}</div>
+  <div style="font-size:20px;font-weight:800;letter-spacing:-.03em;margin-bottom:4px">${ph.title} Phase</div>
+  <div class="t2 small mb16">${ph.tag} · ${ph.goal}</div>`;
+
+  // Today highlight
+  if(ts&&!ts.isRest&&ts.dayObj){
+    html+=`<div class="label-g label mb8">TODAY</div>
+    <button onclick="S.viewDay='${ts.dayObj.id}';render()" class="card g mb16" style="width:100%;text-align:left;cursor:pointer;border-color:var(--gb)">
+      <div class="row between">
+        <div>
+          <div class="label-g label mb4">Tap to start</div>
+          <div style="font-size:17px;font-weight:700;margin-bottom:2px">${ts.dayObj.name}</div>
+          <div class="t2 small">${ts.dayObj.focus}</div>
+        </div>
+        <div style="text-align:right">
+          ${wLog.done&&wLog.dayId===ts.dayObj.id?'<span class="chip chip-g">✓ Done</span>':'<span class="g" style="font-size:24px">→</span>'}
+        </div>
       </div>
-      <span class="chip green">✓ Done</span>
-    </div>`).join('');
+    </button>`;
+  }
+
+  // All days
+  html+=`<div class="label mb8">All Training Days</div>`;
+  ph.days.forEach(day=>{
+    html+=`<button onclick="S.viewDay='${day.id}';render()" class="card mb8" style="width:100%;text-align:left;cursor:pointer">
+      <div class="row between">
+        <div>
+          <div class="label t3 mb4">${day.id}</div>
+          <div style="font-size:15px;font-weight:600;margin-bottom:2px">${day.name}</div>
+          <div class="t3 small">${day.focus}</div>
+        </div>
+        <div style="text-align:right">
+          <div class="t3 xs mb4">${day.exercises.length} exercises</div>
+          <span class="t3" style="font-size:18px">›</span>
+        </div>
+      </div>
+    </button>`;
+  });
+
+  // Recent logs
+  html+=`<div class="label mt20 mb8">Recent Sessions</div>`;
+  const recent=Object.entries(S.workoutLogs).filter(([,v])=>v.done).sort(([a],[b])=>b.localeCompare(a)).slice(0,5);
+  if(!recent.length) html+=`<div class="t3 small">No sessions yet. Do today's workout!</div>`;
+  else recent.forEach(([date,log])=>{
+    html+=`<div class="row between" style="padding:10px 0;border-bottom:1px solid var(--border)">
+      <div><div class="small bold">${log.dayName||log.dayId}</div><div class="t3 xs">${fmt(date)}</div></div>
+      <span class="chip chip-g">✓ Done</span>
+    </div>`;
+  });
+
+  c.innerHTML=html;
 }
 
-function selectWorkoutDay(id){ State.selectedWorkoutDay=id; State.expandedEx=null; render(); }
-function backToDays(){ State.selectedWorkoutDay=null; render(); }
-function toggleEx(id){ State.expandedEx=State.expandedEx===id?null:id; render(); }
+function renderDayDetail(c,day,ph,td,wLog){
+  const exDone=wLog.exercises||{};
+  const doneCount=day.exercises.filter(e=>exDone[e.id]).length;
+  const allDone=doneCount===day.exercises.length;
+  const sessionDone=wLog.done&&wLog.dayId===day.id;
 
-function toggleExDone(exId, dayId){
+  let html=`<button class="btn btn-ghost mb12" style="padding:8px 14px;font-size:12px" onclick="S.viewDay=null;render()">← Back</button>
+  <div class="label-g label mb4">${ph.label}</div>
+  <div style="font-size:21px;font-weight:800;letter-spacing:-.03em;margin-bottom:2px">${day.name}</div>
+  <div class="t2 small mb4">${day.focus}</div>
+  <div class="row gap6 mb16">
+    <span class="chip chip-gray">${doneCount}/${day.exercises.length} done</span>
+    ${sessionDone?'<span class="chip chip-g">✓ Logged</span>':''}
+  </div>`;
+
+  // Warmup
+  html+=`<div class="label-o label mb8">🔥 Warm-Up (10–12 min)</div>
+  <div class="card o mb16">
+    ${day.warmup.map((w,i)=>`
+      <div class="wu-row">
+        <div><div class="small bold">${w.name}</div><div class="t3 xs mt4">${w.cue}</div></div>
+        <span class="chip chip-o" style="flex-shrink:0">${w.sets}</span>
+      </div>`).join('')}
+  </div>`;
+
+  // Exercises
+  html+=`<div class="label-g label mb8">💪 Main Workout</div>`;
+  day.exercises.forEach((ex,i)=>{
+    const done=!!exDone[ex.id];
+    const open=S.expandedEx===ex.id;
+    html+=`<div class="ex${done?' done':''}${open?' open':''}">
+      <div class="ex-top" onclick="S.expandedEx=S.expandedEx==='${ex.id}'?null:'${ex.id}';render()">
+        <div onclick="event.stopPropagation();toggleExDone('${ex.id}','${day.id}','${day.name}')" class="chk${done?' on':''}">
+          ${done?`<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>`:''}
+        </div>
+        <div style="flex:1">
+          <div class="small bold${done?' t3':''}" style="${done?'text-decoration:line-through':''}">${i+1}. ${ex.name}</div>
+          <div class="t3 xs mt4">${ex.muscles}</div>
+        </div>
+        <span class="chip chip-g" style="margin-right:6px;flex-shrink:0">${ex.sets}</span>
+        <span class="t3" style="font-size:18px;transition:transform .2s;transform:${open?'rotate(90deg)':'none'}">›</span>
+      </div>
+      ${open?`<div class="ex-body">
+        <div class="ex-how">${ex.how}</div>
+        ${ex.cue?`<div class="ex-cue">💡 ${ex.cue}</div>`:''}
+      </div>`:''}
+    </div>`;
+  });
+
+  html+=`<div style="height:16px"></div>
+  <button class="btn btn-full ${allDone?'btn-g':'btn-ghost'}" style="padding:15px" onclick="finishWorkout('${day.id}','${day.name}')">
+    ${sessionDone?'✓ Workout Logged':'Mark Complete ✓'}
+  </button>
+  ${sessionDone?`<div class="t3 xs center mt8">Logged ${fmt(td)}</div>`:''}`;
+
+  c.innerHTML=html;
+}
+
+function toggleExDone(exId,dayId,dayName){
   const td=today();
-  const wLog=State.workoutLogs[td]||{exercises:{},dayId};
+  const wLog={...S.workoutLogs[td]||{exercises:{}}};
   wLog.exercises=wLog.exercises||{};
-  wLog.dayId=dayId;
+  wLog.dayId=dayId; wLog.dayName=dayName;
   wLog.exercises[exId]=!wLog.exercises[exId];
-  const logs={...State.workoutLogs,[td]:wLog};
-  save('workoutLogs',logs);
+  save('workoutLogs',{...S.workoutLogs,[td]:wLog});
   render();
 }
 
-function finishWorkout(dayId){
+function finishWorkout(dayId,dayName){
   const td=today();
-  const ph=currentPhase();
-  const day=ph.days.find(d=>d.id===dayId);
-  const wLog=State.workoutLogs[td]||{exercises:{}};
-  wLog.dayId=dayId;
-  wLog.dayName=day?day.name:dayId;
-  wLog.phaseId=State.phase;
-  wLog.done=true;
-  // Mark all exercises done
-  if(day) day.exercises.forEach(e=>{ wLog.exercises=wLog.exercises||{}; wLog.exercises[e.id]=true; });
-  const logs={...State.workoutLogs,[td]:wLog};
-  save('workoutLogs',logs);
-  showToast('Workout logged! 💪');
+  const ph=getTodayStatus();
+  const wLog={...S.workoutLogs[td]||{exercises:{}}};
+  // find day to mark all done
+  const phase=ph?ph.phase:PROGRAM.phases[0];
+  const day=phase.days.find(d=>d.id===dayId);
+  if(day) day.exercises.forEach(e=>{wLog.exercises=wLog.exercises||{};wLog.exercises[e.id]=true;});
+  wLog.dayId=dayId; wLog.dayName=dayName; wLog.done=true; wLog.phaseId=phase.id;
+  save('workoutLogs',{...S.workoutLogs,[td]:wLog});
+  toast('Workout logged! 💪');
   render();
 }
 
 // ── CARDIO ────────────────────────────────────────────────────
 function renderCardio(c){
   const td=today();
-  const cLog=State.cardioLogs[td]||{};
-  const wk=weekNumber();
-  // Find current block
+  const cLog=S.cardioLogs[td]||{};
+  const ts=getTodayStatus();
+  const wk=ts?ts.weekNum:1;
   const block=getCardioBlock(wk);
+  const recent=Object.entries(S.cardioLogs).filter(([,v])=>v.done).sort(([a],[b])=>b.localeCompare(a));
 
-  c.innerHTML=`
-  <div class="sec-eyebrow">Stamina Program · Week ${wk}</div>
-  <div class="sec-title">Cardio Tracker</div>
+  let html=`<div class="label mb4">Week ${wk} · Cardio</div>
+  <div style="font-size:20px;font-weight:800;letter-spacing:-.03em;margin-bottom:16px">Stamina Tracker</div>`;
 
-  <!-- Current block -->
-  <div class="card mb16" style="background:${block.color}12;border-color:${block.color}35">
+  // Current block
+  html+=`<div class="card mb16" style="background:${block.color}12;border-color:${block.color}35">
     <div class="row between mb8">
       <div>
-        <div style="color:${block.color};font-family:var(--mono);font-size:10px;letter-spacing:.15em;text-transform:uppercase;margin-bottom:4px">${block.block} · ${block.weeks}</div>
-        <div style="font-family:var(--display);font-size:17px;font-weight:700">${block.type}</div>
+        <div style="color:${block.color};font-family:var(--mono);font-size:10px;letter-spacing:.15em;text-transform:uppercase;margin-bottom:3px">${block.block} · ${block.weeks}</div>
+        <div style="font-size:17px;font-weight:700">${block.type}</div>
       </div>
-      <span class="chip" style="background:${block.color}20;color:${block.color};border:1px solid ${block.color}35">${block.sessionsPerWeek}×/wk</span>
+      <span class="chip" style="background:${block.color}18;color:${block.color};border:1px solid ${block.color}35">${block.sessionsPerWeek}×/wk</span>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0">
-      <div style="background:#111;border-radius:8px;padding:10px 12px">
-        <div class="t3 small mono" style="margin-bottom:3px">INTERVAL</div>
-        <div style="color:${block.color};font-size:13px;font-weight:600">${block.work}</div>
-        <div class="t2 small">${block.rest}</div>
-        <div class="t3 small mono">${block.rounds}</div>
+      <div style="background:var(--s3);border-radius:9px;padding:10px 12px">
+        <div class="label t3 mb4">INTERVAL</div>
+        <div style="color:${block.color};font-size:13px;font-weight:700">${block.work}</div>
+        <div class="t2 xs mt4">${block.rest}</div>
+        <div class="t3 xs mt4 mono">${block.rounds}</div>
       </div>
-      <div style="background:#111;border-radius:8px;padding:10px 12px">
-        <div class="t3 small mono" style="margin-bottom:3px">TOTAL RUN</div>
-        <div style="color:var(--t1);font-size:13px;font-weight:600">${block.totalRun}</div>
-        <div class="t2 small">RPE: ${block.rpe}</div>
+      <div style="background:var(--s3);border-radius:9px;padding:10px 12px">
+        <div class="label t3 mb4">TOTAL</div>
+        <div class="small bold">${block.totalRun}</div>
+        <div class="t2 xs mt4">RPE: ${block.rpe}</div>
       </div>
     </div>
-    <div style="background:${block.color}10;border-radius:8px;padding:10px 12px">
-      <div style="color:${block.color};font-size:12px;font-weight:600;margin-bottom:4px">🎯 ${block.goal}</div>
-      <div class="t2 small" style="line-height:1.6">${block.tip}</div>
+    <div style="background:${block.color}10;border-radius:9px;padding:10px 12px">
+      <div style="color:${block.color};font-size:12px;font-weight:700;margin-bottom:4px">🎯 ${block.goal}</div>
+      <div class="t2 xs" style="line-height:1.65">${block.tip}</div>
     </div>
-  </div>
+  </div>`;
 
-  <!-- Log today -->
-  <div class="card mb16" style="${cLog.done?'border-color:var(--accent-b)':''}">
-    <div class="small bold mb8">Log Today's Cardio</div>
-    <div class="input-group">
+  // Log
+  html+=`<div class="card${cLog.done?' g':''} mb16">
+    <div class="small bold mb12">Log Today's Cardio</div>
+    <div class="inp-group">
       <label>Duration (minutes)</label>
-      <input type="number" id="cardioDur" value="${cLog.duration||20}" min="5" max="60" placeholder="20"/>
+      <input type="number" id="cDur" value="${cLog.duration||20}" min="5" max="60"/>
     </div>
-    <div class="input-group">
+    <div class="inp-group">
       <label>Notes (optional)</label>
-      <input type="text" id="cardioNote" value="${cLog.note||''}" placeholder="How did it feel?"/>
+      <input type="text" id="cNote" value="${cLog.note||''}" placeholder="How did it feel?"/>
     </div>
-    <button class="btn ${cLog.done?'btn-ghost':'btn-primary'}" style="width:100%" onclick="logCardio()">
-      ${cLog.done?'✓ Logged — Update':'Log Cardio Session ✓'}
+    <button class="btn btn-full ${cLog.done?'btn-ghost':'btn-g'}" onclick="logCardio()">
+      ${cLog.done?'✓ Logged — Update':'Log Cardio ✓'}
     </button>
-  </div>
+  </div>`;
 
-  <!-- Recent sessions -->
-  <div class="sec-eyebrow">Recent Sessions</div>
-  ${recentCardio()}
+  // Recent
+  html+=`<div class="label mb8">Recent Sessions</div>`;
+  if(!recent.length) html+=`<div class="t3 small">No cardio logged yet.</div>`;
+  else recent.slice(0,6).forEach(([date,log])=>{
+    html+=`<div class="row between" style="padding:10px 0;border-bottom:1px solid var(--border)">
+      <div><div class="small bold">${log.duration} min${log.note?' · '+log.note:''}</div><div class="t3 xs">${fmt(date)}</div></div>
+      <span class="chip chip-g">✓</span>
+    </div>`;
+  });
 
-  <!-- All blocks -->
-  <div class="sec-eyebrow mt20">Full Progression Plan</div>
-  ${PROGRAM.cardioBlocks.map(b=>`
-    <div class="card mb8" style="border-color:${b.color}${wk>=parseInt(b.weeks.split('–')[0].replace('Weeks ',''))?'40':'20'};opacity:${wk>=parseInt(b.weeks.split('–')[0].replace('Weeks ',''))?1:.5}">
-      <div class="row between">
-        <div>
-          <div style="color:${b.color};font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;margin-bottom:3px">${b.block} · ${b.weeks}</div>
-          <div class="small bold">${b.type}</div>
-          <div class="t3 small">${b.work} / ${b.rest}</div>
-        </div>
-        <span class="chip" style="background:${b.color}15;color:${b.color};border:1px solid ${b.color}30">${b.sessionsPerWeek}×/wk</span>
-      </div>
-    </div>`).join('')}
-  `;
+  c.innerHTML=html;
 }
 
-function getCardioBlock(week){
-  // Map week to block
-  if(week<=3) return PROGRAM.cardioBlocks[0];
-  if(week<=6) return PROGRAM.cardioBlocks[1];
-  if(week<=10) return PROGRAM.cardioBlocks[2];
-  if(week<=14) return PROGRAM.cardioBlocks[3];
-  if(week<=18) return PROGRAM.cardioBlocks[4];
-  if(week<=22) return PROGRAM.cardioBlocks[5];
+function getCardioBlock(wk){
+  if(wk<=3) return PROGRAM.cardioBlocks[0];
+  if(wk<=6) return PROGRAM.cardioBlocks[1];
+  if(wk<=10) return PROGRAM.cardioBlocks[2];
+  if(wk<=14) return PROGRAM.cardioBlocks[3];
+  if(wk<=18) return PROGRAM.cardioBlocks[4];
+  if(wk<=22) return PROGRAM.cardioBlocks[5];
   return PROGRAM.cardioBlocks[6];
-}
-
-function recentCardio(){
-  const entries=Object.entries(State.cardioLogs)
-    .filter(([,v])=>v.done)
-    .sort(([a],[b])=>b.localeCompare(a))
-    .slice(0,5);
-  if(!entries.length) return `<p class="t3 small">No cardio logged yet. Start today!</p>`;
-  return entries.map(([date,log])=>`
-    <div class="row between" style="padding:9px 0;border-bottom:1px solid var(--border)">
-      <div>
-        <div class="small" style="font-weight:500">${log.duration} min ${log.note?'· '+log.note:''}</div>
-        <div class="t3 small">${fmt(date)}</div>
-      </div>
-      <span class="chip green">✓ Done</span>
-    </div>`).join('');
 }
 
 function logCardio(){
   const td=today();
-  const dur=parseInt(document.getElementById('cardioDur').value)||20;
-  const note=document.getElementById('cardioNote').value||'';
-  const wk=weekNumber();
-  const block=getCardioBlock(wk);
-  const logs={...State.cardioLogs,[td]:{done:true,duration:dur,note,blockId:block.id}};
-  save('cardioLogs',logs);
-  showToast('Cardio logged! 🏃');
-  render();
+  const dur=parseInt(document.getElementById('cDur').value)||20;
+  const note=document.getElementById('cNote').value||'';
+  const ts=getTodayStatus();
+  const block=getCardioBlock(ts?ts.weekNum:1);
+  save('cardioLogs',{...S.cardioLogs,[td]:{done:true,duration:dur,note,blockId:block.id}});
+  toast('Cardio logged! 🏃');render();
 }
 
 // ── NUTRITION ─────────────────────────────────────────────────
 function renderNutrition(c){
   const td=today();
-  const mLog=State.mealLogs[td]||{};
-  const nutrition=PROGRAM.nutrition[State.phase]||PROGRAM.nutrition.p1;
-  const ph=currentPhase();
+  const mLog=S.mealLogs[td]||{};
+  const ts=getTodayStatus();
+  const ph=ts?ts.phase:PROGRAM.phases[0];
+  const nutrition=PROGRAM.nutrition[ph.id]||PROGRAM.nutrition.p1;
+  const done=nutrition.meals.filter(m=>mLog[m.id]).length;
+  const pct=Math.round((done/nutrition.meals.length)*100);
 
-  const mealsDone=nutrition.meals.filter(m=>mLog[m.id]).length;
-  const pct=Math.round((mealsDone/nutrition.meals.length)*100);
+  let html=`<div class="label mb4">${ph.label} · Nutrition</div>
+  <div style="font-size:20px;font-weight:800;letter-spacing:-.03em;margin-bottom:16px">Today's Meals</div>`;
 
-  c.innerHTML=`
-  <div class="sec-eyebrow">${ph.label} Nutrition</div>
-  <div class="sec-title">Today's Meal Plan</div>
+  // Summary
+  html+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px">
+    <div class="stat-box"><div class="stat-val g">${nutrition.calories}</div><div class="stat-sub">kcal target</div></div>
+    <div class="stat-box"><div class="stat-val" style="color:var(--blue)">${nutrition.protein}</div><div class="stat-sub">protein target</div></div>
+  </div>`;
 
-  <!-- Summary -->
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px">
-    <div class="card" style="text-align:center">
-      <div style="font-family:var(--mono);font-size:20px;font-weight:700;color:var(--accent)">${nutrition.calories}</div>
-      <div class="t3 small">kcal target</div>
-    </div>
-    <div class="card" style="text-align:center">
-      <div style="font-family:var(--mono);font-size:20px;font-weight:700;color:var(--info)">${nutrition.protein}</div>
-      <div class="t3 small">protein target</div>
-    </div>
-  </div>
+  // Progress
+  html+=`<div class="card g mb16">
+    <div class="row between mb8"><span class="small bold">Meals Tracked</span><span class="mono xs g">${done}/${nutrition.meals.length}</span></div>
+    <div class="pbar"><div class="pbar-fill" style="width:${pct}%;background:var(--g)"></div></div>
+  </div>`;
 
-  <!-- Progress -->
-  <div class="card mb16" style="${mealsDone===nutrition.meals.length?'border-color:var(--accent-b)':''}">
-    <div class="row between mb8">
-      <span class="small bold">Meals Tracked</span>
-      <span class="mono small" style="color:var(--accent)">${mealsDone}/${nutrition.meals.length}</span>
-    </div>
-    <div style="background:#1a1a1a;border-radius:99px;height:5px;overflow:hidden">
-      <div style="width:${pct}%;background:var(--accent);height:100%;border-radius:99px;transition:width .5s ease"></div>
-    </div>
-  </div>
+  // Note
+  html+=`<div class="card b mb16"><div class="small bold mb4" style="color:var(--blue)">Phase Note</div><div class="t2 small" style="line-height:1.6">${nutrition.note}</div></div>`;
 
-  <!-- Note -->
-  <div class="card info mb16">
-    <div class="small bold" style="color:var(--info);margin-bottom:4px">Phase Note</div>
-    <div class="t2 small" style="line-height:1.6">${nutrition.note}</div>
-  </div>
-
-  <!-- Meals -->
-  ${nutrition.meals.map(meal=>{
-    const done=!!mLog[meal.id];
-    return `<div class="meal-card" style="${done?'border-color:var(--accent-b);opacity:.8':''}">
-      <div class="meal-header">
-        <div>
-          <span style="font-size:18px;margin-right:8px">${meal.icon}</span>
-          <span class="meal-time ${done?'t2':''}" style="${done?'text-decoration:line-through':''}">${meal.time}</span>
+  // Meals
+  nutrition.meals.forEach(meal=>{
+    const isDone=!!mLog[meal.id];
+    html+=`<div class="meal${isDone?' done':''}">
+      <div class="meal-hd">
+        <div class="row gap8">
+          <span style="font-size:18px">${meal.icon}</span>
+          <span class="meal-time${isDone?' t3':''}" style="${isDone?'text-decoration:line-through':''}">${meal.time}</span>
         </div>
-        <div style="text-align:right">
-          <button onclick="toggleMeal('${meal.id}')" class="check-box${done?' done':''}" style="margin-left:auto">
-            ${done?`<svg viewBox="0 0 24 24" fill="none"><polyline points="20 6 9 17 4 12"/></svg>`:''}
-          </button>
-        </div>
+        <button onclick="toggleMeal('${meal.id}')" class="chk${isDone?' on':''}">
+          ${isDone?`<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>`:''}
+        </button>
       </div>
       <div class="row between mb8">
-        <span class="chip green">${meal.protein}</span>
-        <span class="t3 small mono">${meal.kcal}</span>
+        <span class="chip chip-g">${meal.protein}</span>
+        <span class="t3 xs mono">${meal.kcal}</span>
       </div>
-      <ul class="meal-items">
-        ${meal.items.map(i=>`<li>${i}</li>`).join('')}
-      </ul>
+      <ul class="meal-items">${meal.items.map(i=>`<li>${i}</li>`).join('')}</ul>
     </div>`;
-  }).join('')}
+  });
 
-  <!-- Budget protein cheat sheet -->
-  <div class="sec-eyebrow mt20">Budget Protein Cheat Sheet</div>
-  <div class="card">
+  // Protein cheat sheet
+  html+=`<div class="label mt20 mb8">Budget Protein Guide</div><div class="card">
     ${[
       {f:'1 Egg',p:'6g',c:'₹7–8'},
       {f:'50g Soy Chunks (dry)',p:'25g',c:'₹10–12'},
@@ -520,197 +561,133 @@ function renderNutrition(c){
       {f:'20g Sattu',p:'8g',c:'₹5–7'},
       {f:'30g Peanuts',p:'8g',c:'₹5–6'},
       {f:'1 katori Dal',p:'8–10g',c:'₹8–10'},
-    ].map((s,i,arr)=>`
-      <div class="row between" style="padding:9px 0;${i<arr.length-1?'border-bottom:1px solid var(--border)':''}">
-        <div>
-          <div class="small" style="font-weight:500">${s.f}</div>
-          <div class="t3 small">${s.c}</div>
-        </div>
-        <span class="chip green">${s.p}</span>
-      </div>`).join('')}
-  </div>
-  `;
+    ].map((s,i,a)=>`<div class="row between" style="padding:9px 0;${i<a.length-1?'border-bottom:1px solid var(--border)':''}">
+      <div><div class="small bold">${s.f}</div><div class="t3 xs">${s.c}</div></div>
+      <span class="chip chip-g">${s.p}</span>
+    </div>`).join('')}
+  </div>`;
+
+  c.innerHTML=html;
 }
 
-function toggleMeal(mealId){
+function toggleMeal(id){
   const td=today();
-  const mLog={...State.mealLogs[td]||{}};
-  mLog[mealId]=!mLog[mealId];
-  const logs={...State.mealLogs,[td]:mLog};
-  save('mealLogs',logs);
-  if(mLog[mealId]) showToast('Meal logged ✓');
-  render();
+  const mLog={...S.mealLogs[td]||{}};
+  mLog[id]=!mLog[id];
+  save('mealLogs',{...S.mealLogs,[td]:mLog});
+  toast(mLog[id]?'Meal logged ✓':'Unmarked');render();
 }
 
 // ── STATS ─────────────────────────────────────────────────────
 function renderStats(c){
-  const stats=State.bodyStats;
-  const lastStat=stats.length?stats[stats.length-1]:null;
-  const currentW=lastStat?lastStat.weight:PROGRAM.startWeight;
-  const lost=+(PROGRAM.startWeight-currentW).toFixed(1);
-  const toGo=+(currentW-PROGRAM.targetWeight).toFixed(1);
+  const stats=S.bodyStats;
+  const last=stats.length?stats[stats.length-1]:null;
+  const curW=last?last.weight:PROGRAM.startWeight;
+  const lost=+(PROGRAM.startWeight-curW).toFixed(1);
+  const toGo=+(curW-PROGRAM.targetWeight).toFixed(1);
 
-  c.innerHTML=`
-  <div class="sec-eyebrow">Progress Tracking</div>
-  <div class="sec-title">Body Stats</div>
+  let html=`<div class="label mb4">Progress</div>
+  <div style="font-size:20px;font-weight:800;letter-spacing:-.03em;margin-bottom:16px">Body Stats</div>`;
 
-  <!-- Key stats -->
-  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px">
-    <div class="card" style="text-align:center">
-      <div style="font-family:var(--mono);font-size:18px;font-weight:700;color:var(--t1)">${currentW}</div>
-      <div class="t3 small">Current kg</div>
-    </div>
-    <div class="card" style="text-align:center">
-      <div style="font-family:var(--mono);font-size:18px;font-weight:700;color:var(--accent)">${lost>0?'▼'+lost:'-'}</div>
-      <div class="t3 small">kg lost</div>
-    </div>
-    <div class="card" style="text-align:center">
-      <div style="font-family:var(--mono);font-size:18px;font-weight:700;color:var(--warn)">${toGo>0?toGo:0}</div>
-      <div class="t3 small">kg to go</div>
-    </div>
-  </div>
+  // Stats
+  html+=`<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px">
+    <div class="stat-box"><div class="stat-val" style="font-size:17px">${curW}</div><div class="stat-sub">kg now</div></div>
+    <div class="stat-box"><div class="stat-val g" style="font-size:17px">${lost>0?'▼'+lost:'-'}</div><div class="stat-sub">kg lost</div></div>
+    <div class="stat-box"><div class="stat-val" style="color:var(--orange);font-size:17px">${toGo>0?toGo:'✓'}</div><div class="stat-sub">kg to go</div></div>
+  </div>`;
 
-  <!-- Weight chart -->
-  ${stats.length>=2?weightChart(stats):''}
+  // Chart
+  if(stats.length>=2) html+=weightChart(stats);
 
-  <!-- Log new stat -->
-  <div class="card mb16" style="border-color:var(--accent-b)">
-    <div class="small bold mb12">Log Today's Stats</div>
-    <div class="input-group">
-      <label>Weight (kg)</label>
-      <input type="number" id="statWeight" step="0.1" min="50" max="120" placeholder="${currentW}" value="${lastStat?lastStat.weight:''}"/>
-    </div>
-    <div class="input-group">
-      <label>Waist (cm) — optional</label>
-      <input type="number" id="statWaist" step="0.5" min="50" max="120" placeholder="${lastStat&&lastStat.waist?lastStat.waist:'e.g. 88'}"/>
-    </div>
-    <div class="input-group">
-      <label>Notes (optional)</label>
-      <input type="text" id="statNote" placeholder="How are you feeling?"/>
-    </div>
-    <button class="btn btn-primary" style="width:100%" onclick="logStat()">Save Stats ✓</button>
-  </div>
+  // Log
+  html+=`<div class="card g mb16">
+    <div class="small bold mb12">Log Today</div>
+    <div class="inp-group"><label>Weight (kg)</label><input type="number" id="sW" step="0.1" min="50" max="120" placeholder="${curW}"/></div>
+    <div class="inp-group"><label>Waist (cm) — optional</label><input type="number" id="sWaist" step="0.5" min="50" max="120" placeholder="e.g. 88"/></div>
+    <div class="inp-group" style="margin-bottom:0"><label>Notes</label><input type="text" id="sNote" placeholder="How do you feel?"/></div>
+    <div style="height:12px"></div>
+    <button class="btn btn-g btn-full" onclick="logStat()">Save Stats ✓</button>
+  </div>`;
 
-  <!-- History -->
-  <div class="sec-eyebrow">History</div>
-  <div class="card">
-    ${stats.length===0?`<p class="t3 small">No stats logged yet. Log your first entry above.</p>`:
-      [...stats].reverse().slice(0,15).map((s,i)=>`
-        <div class="row between" style="padding:9px 0;${i<Math.min(stats.length,15)-1?'border-bottom:1px solid var(--border)':''}">
-          <div>
-            <div class="small" style="font-weight:500">${s.weight} kg${s.waist?' · '+s.waist+' cm waist':''}</div>
-            <div class="t3 small">${fmt(s.date)}${s.note?' · '+s.note:''}</div>
-          </div>
-          <div style="text-align:right">
-            ${getStatDelta(s,stats)}
-          </div>
-        </div>`).join('')}
-  </div>
+  // History
+  html+=`<div class="label mb8">History</div><div class="card">`;
+  if(!stats.length) html+=`<div class="t3 small">No stats yet. Log your first entry above.</div>`;
+  else [...stats].reverse().slice(0,15).forEach((s,i,arr)=>{
+    const prev=arr[i+1];
+    const diff=prev?+(s.weight-prev.weight).toFixed(1):null;
+    html+=`<div class="row between" style="padding:10px 0;${i<arr.length-1?'border-bottom:1px solid var(--border)':''}">
+      <div><div class="small bold">${s.weight} kg${s.waist?' · '+s.waist+' cm':''}</div><div class="t3 xs">${fmt(s.date)}${s.note?' · '+s.note:''}</div></div>
+      ${diff!==null?`<span class="mono xs" style="color:${diff<0?'var(--g)':diff>0?'var(--red)':'var(--t3)'}">${diff>0?'+':''}${diff}</span>`:'<span class="t3 xs">start</span>'}
+    </div>`;
+  });
+  html+=`</div>`;
 
-  <!-- Summary week by week expected -->
-  <div class="sec-eyebrow mt20">Expected Timeline</div>
-  <div class="card">
+  // Timeline
+  html+=`<div class="label mt20 mb8">Expected Timeline</div><div class="card">
     ${[
-      {weeks:'Weeks 1–3',weight:'~79 kg',note:'Water weight + early fat loss'},
-      {weeks:'Weeks 4–8',weight:'~77–78 kg',note:'Face gets leaner, waist smaller'},
-      {weeks:'Weeks 8–12',weight:'~75–76 kg',note:'Abs start showing'},
-      {weeks:'Weeks 12–17',weight:'~72–73 kg',note:'Target zone. Clear abs. V-taper visible'},
-    ].map((r,i,arr)=>`
-      <div class="row between" style="padding:10px 0;${i<arr.length-1?'border-bottom:1px solid var(--border)':''}">
-        <div>
-          <div class="small mono" style="color:var(--accent);margin-bottom:2px">${r.weeks}</div>
-          <div class="t2 small">${r.note}</div>
-        </div>
-        <span style="font-family:var(--mono);font-size:14px;font-weight:700;color:var(--t1)">${r.weight}</span>
-      </div>`).join('')}
-  </div>
+      {w:'Weeks 1–3',kg:'~79 kg',n:'Water weight + early fat loss'},
+      {w:'Weeks 4–8',kg:'~77–78 kg',n:'Face gets leaner, waist smaller'},
+      {w:'Weeks 8–12',kg:'~75–76 kg',n:'Abs start showing'},
+      {w:'Weeks 12–17',kg:'~72–73 kg',n:'Target zone. Clear abs. V-taper.'},
+    ].map((r,i,a)=>`<div class="row between" style="padding:10px 0;${i<a.length-1?'border-bottom:1px solid var(--border)':''}">
+      <div><div class="xs mono g mb2">${r.w}</div><div class="t2 small">${r.n}</div></div>
+      <span class="mono small bold">${r.kg}</span>
+    </div>`).join('')}
+  </div>`;
 
-  <!-- Danger zone: reset -->
-  <div class="mt20">
-    <button class="btn btn-danger small" style="width:100%;padding:11px" onclick="confirmReset()">Reset All Data</button>
-    <p class="t3 small" style="text-align:center;margin-top:6px">This cannot be undone</p>
-  </div>
-  `;
-}
+  // Reset
+  html+=`<div class="mt20"><button class="btn btn-red btn-full" onclick="confirmReset()">Reset All Data</button><div class="t3 xs center mt8">Cannot be undone</div></div>`;
 
-function getStatDelta(stat, allStats){
-  const idx=allStats.findIndex(s=>s.date===stat.date&&s.weight===stat.weight);
-  if(idx<=0) return `<span class="t3 small">—</span>`;
-  const prev=allStats[idx-1];
-  const diff=+(stat.weight-prev.weight).toFixed(1);
-  const color=diff<0?'var(--accent)':diff>0?'var(--red)':'var(--t3)';
-  return `<span style="color:${color};font-family:var(--mono);font-size:12px;font-weight:600">${diff>0?'+':''}${diff} kg</span>`;
+  c.innerHTML=html;
 }
 
 function weightChart(stats){
-  if(stats.length<2) return '';
   const recent=stats.slice(-10);
   const weights=recent.map(s=>s.weight);
-  const min=Math.floor(Math.min(...weights,PROGRAM.targetWeight)-0.5);
-  const max=Math.ceil(Math.max(...weights)+0.5);
-  const W=320,H=120,pad=30;
-  const iW=W-pad*2,iH=H-pad;
-  const x=(i)=>pad+i*(iW/(recent.length-1));
-  const y=(w)=>pad+(1-(w-min)/(max-min))*iH;
+  const mn=Math.floor(Math.min(...weights,PROGRAM.targetWeight)-1);
+  const mx=Math.ceil(Math.max(...weights)+1);
+  const W=340,H=130,pl=32,pr=16,pt=12,pb=24;
+  const iW=W-pl-pr,iH=H-pt-pb;
+  const x=i=>pl+i*(iW/Math.max(1,recent.length-1));
+  const y=v=>pt+(1-(v-mn)/(mx-mn))*iH;
   const pts=recent.map((s,i)=>`${x(i)},${y(s.weight)}`).join(' ');
-  const targetY=y(PROGRAM.targetWeight);
-  return `
-  <div class="card mb16">
-    <div class="small bold mb8">Weight History</div>
-    <div class="chart-wrap">
+  const tY=y(PROGRAM.targetWeight);
+  return `<div class="card mb16">
+    <div class="small bold mb8">Weight Chart</div>
+    <div class="chart-scroll">
       <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
-        <!-- Grid -->
-        ${[min,Math.round((min+max)/2),max].map(v=>`
-          <line x1="${pad}" y1="${y(v)}" x2="${W-pad}" y2="${y(v)}" stroke="#242424" stroke-width="1"/>
-          <text x="${pad-4}" y="${y(v)+4}" fill="#444" font-size="9" text-anchor="end">${v}</text>
-        `).join('')}
-        <!-- Target line -->
-        <line x1="${pad}" y1="${targetY}" x2="${W-pad}" y2="${targetY}" stroke="#C8F56055" stroke-width="1" stroke-dasharray="4,3"/>
-        <text x="${W-pad+2}" y="${targetY+4}" fill="#C8F560" font-size="8">72</text>
-        <!-- Line -->
-        <polyline points="${pts}" fill="none" stroke="#C8F560" stroke-width="2" stroke-linejoin="round"/>
-        <!-- Dots -->
-        ${recent.map((s,i)=>`
-          <circle cx="${x(i)}" cy="${y(s.weight)}" r="3" fill="#C8F560"/>
-        `).join('')}
-        <!-- X labels -->
-        ${recent.map((s,i)=>i%Math.ceil(recent.length/4)===0?`
-          <text x="${x(i)}" y="${H-2}" fill="#444" font-size="8" text-anchor="middle">${fmtShort(s.date)}</text>
-        `:'').join('')}
+        ${[mn,Math.round((mn+mx)/2),mx].map(v=>`
+          <line x1="${pl}" y1="${y(v)}" x2="${W-pr}" y2="${y(v)}" stroke="#2A2A2A" stroke-width="1"/>
+          <text x="${pl-4}" y="${y(v)+4}" fill="#4A4A4A" font-size="9" text-anchor="end" font-family="Space Mono">${v}</text>`).join('')}
+        <line x1="${pl}" y1="${tY}" x2="${W-pr}" y2="${tY}" stroke="#B8FF3C40" stroke-width="1.5" stroke-dasharray="5,3"/>
+        <text x="${W-pr+2}" y="${tY+4}" fill="#B8FF3C" font-size="8" font-family="Space Mono">72</text>
+        <polyline points="${pts}" fill="none" stroke="#B8FF3C" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+        ${recent.map((s,i)=>`<circle cx="${x(i)}" cy="${y(s.weight)}" r="4" fill="#B8FF3C" stroke="#0D0D0D" stroke-width="2"/>`).join('')}
+        ${recent.map((s,i)=>i%Math.max(1,Math.floor(recent.length/4))===0?`<text x="${x(i)}" y="${H-4}" fill="#4A4A4A" font-size="8" text-anchor="middle" font-family="Space Mono">${fmtS(s.date)}</text>`:'').join('')}
       </svg>
     </div>
   </div>`;
 }
 
 function logStat(){
-  const w=parseFloat(document.getElementById('statWeight').value);
-  const waist=parseFloat(document.getElementById('statWaist').value)||null;
-  const note=document.getElementById('statNote').value||'';
-  if(!w||w<40||w>200){ showToast('Enter a valid weight'); return; }
+  const w=parseFloat(document.getElementById('sW').value);
+  if(!w||w<40||w>200){toast('Enter a valid weight');return;}
+  const waist=parseFloat(document.getElementById('sWaist').value)||null;
+  const note=document.getElementById('sNote').value||'';
   const td=today();
-  const stats=[...State.bodyStats];
-  // Update today's if exists, else push
-  const existing=stats.findIndex(s=>s.date===td);
+  const stats=[...S.bodyStats];
+  const ei=stats.findIndex(s=>s.date===td);
   const entry={date:td,weight:w,waist,note};
-  if(existing>=0) stats[existing]=entry;
-  else stats.push(entry);
+  if(ei>=0) stats[ei]=entry; else stats.push(entry);
   stats.sort((a,b)=>a.date.localeCompare(b.date));
   save('bodyStats',stats);
-  showToast('Stats saved ✓');
-  render();
+  toast('Stats saved ✓');render();
 }
 
 function confirmReset(){
-  if(confirm('Delete ALL your progress data? This cannot be undone.')){
-    localStorage.clear();
-    location.reload();
-  }
+  if(confirm('Delete ALL progress data? Cannot be undone.')){localStorage.clear();location.reload();}
 }
 
 // ── INIT ──────────────────────────────────────────────────────
 render();
-
-// Service worker registration
-if('serviceWorker' in navigator){
-  navigator.serviceWorker.register('sw.js').catch(()=>{});
-}
+if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});
